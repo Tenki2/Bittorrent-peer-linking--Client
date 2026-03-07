@@ -2,3 +2,6 @@ desktop.ini
 btprobe
 src/data/
 *.torrent
+src/build/
+btclient
+.vscode
