@@ -5,3 +5,5 @@ src/data/
 src/build/
 btclient
 .vscode
+src/artifacts-test/*
+src/artifacts/*

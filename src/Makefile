@@ -9,6 +9,6 @@ all:
 clean:
 	@$(MAKE) -C build clean
 
-# Bonus shortcut: compile and immediately run the seeder
+# Bonus shortcut: compile and run the probe against the bundled torrent file
 run: all
-	./build/btclient test-file.torrent -p 51413 -i 10.20.107.50
+	./build/btclient -f big.torrent -t 30 -p 51413
