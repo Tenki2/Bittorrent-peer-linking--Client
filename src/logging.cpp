@@ -24,12 +24,36 @@ OutputPaths prepare_output_paths(
 {
     OutputPaths paths;
 
-    // Normal runs write into artifacts/<run>/<session>. The explicit path
+    // Normal runs write into artifacts/pending/<session>. The explicit path
     // options are mainly for tests and one-off captures.
     paths.artifact_dir = std::filesystem::absolute(
-        config.artifacts_dir / config.run_id / config.session_id);
+        config.artifacts_dir / "pending" / config.session_id);
+    std::filesystem::path const archive_dir = std::filesystem::absolute(
+        config.artifacts_dir / "archive" / config.session_id);
+    if (std::filesystem::exists(archive_dir))
+    {
+        throw std::runtime_error(
+            "archive artifact directory already exists: " + archive_dir.string()
+            + "; choose a different --session-id");
+    }
+    if (std::filesystem::exists(paths.artifact_dir))
+    {
+        if (!std::filesystem::is_directory(paths.artifact_dir))
+        {
+            throw std::runtime_error(
+                "artifact path exists but is not a directory: " + paths.artifact_dir.string());
+        }
+        if (!std::filesystem::is_empty(paths.artifact_dir))
+        {
+            throw std::runtime_error(
+                "artifact directory already exists and is not empty: "
+                + paths.artifact_dir.string()
+                + "; choose a different --session-id or resolve the pending artifacts");
+        }
+    }
     std::filesystem::create_directories(paths.artifact_dir);
 
+    paths.state_json_path = paths.artifact_dir / "state.json";
     paths.event_log_path = event_log_override.has_value()
         ? std::filesystem::absolute(*event_log_override)
         : (paths.artifact_dir / "session_events.ndjson");
@@ -60,44 +84,50 @@ void EventWriter::set_info_hash(std::string info_hash)
     info_hash_ = std::move(info_hash);
 }
 
+void EventWriter::close()
+{
+    if (!stream_.is_open()) return;
+
+    stream_.close();
+    if (!stream_)
+    {
+        throw std::runtime_error(
+            "failed to close event log at " + output_paths_.event_log_path.string());
+    }
+}
+
 void EventWriter::write_event(
     std::string event_type,
-    JsonValue payload,
+    json payload,
     std::optional<EventPeerContext> peer_context)
 {
     TimestampPair const ts = capture_timestamp();
 
     // Every line in the event log is a complete JSON object. Keeping the
     // envelope fields consistent makes later analysis much easier.
-    JsonValue event = JsonValue::object();
-    event.add("utc_ts", ts.utc_ts);
-    event.add("mono_ns", ts.mono_ns);
-    event.add("run_id", config_.run_id);
-    event.add("session_id", config_.session_id);
-    event.add("event_type", std::move(event_type));
-    event.add("node_role", config_.node_role);
-    event.add("torrent_source", config_.torrent_source);
-    if (info_hash_.empty())
-    {
-        event.add("info_hash", JsonValue(nullptr));
-    }
-    else
-    {
-        event.add("info_hash", info_hash_);
-    }
+    json event = {
+        {"utc_ts", ts.utc_ts},
+        {"mono_ns", ts.mono_ns},
+        {"run_id", config_.run_id},
+        {"session_id", config_.session_id},
+        {"event_type", std::move(event_type)},
+        {"node_role", config_.node_role},
+        {"torrent_source", config_.torrent_source},
+        {"info_hash", info_hash_.empty() ? json(nullptr) : json(info_hash_)},
+    };
 
     if (peer_context.has_value())
     {
-        event.add("peer_key", peer_context->peer_key);
-        event.add("peer_ip", peer_context->peer_ip);
-        event.add("peer_port", peer_context->peer_port);
-        event.add("direction", peer_context->direction);
-        event.add("transport", peer_context->transport);
+        event["peer_key"] = peer_context->peer_key;
+        event["peer_ip"] = peer_context->peer_ip;
+        event["peer_port"] = peer_context->peer_port;
+        event["direction"] = peer_context->direction;
+        event["transport"] = peer_context->transport;
     }
 
-    event.add("payload", std::move(payload));
+    event["payload"] = std::move(payload);
 
-    stream_ << event.to_string() << "\n";
+    stream_ << event.dump() << "\n";
     stream_.flush();
 }
 

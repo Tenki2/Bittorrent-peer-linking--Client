@@ -4,10 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <ctime>
 #include <iomanip>
-#include <limits>
 #include <numeric>
 #include <sstream>
 #include <unistd.h>
@@ -33,217 +31,13 @@ double percentile(std::vector<double> const& sorted_samples, double fraction)
         + sorted_samples[upper_index] * weight;
 }
 
-JsonValue optional_number(std::optional<double> const& value)
+json optional_number(std::optional<double> const& value)
 {
-    if (!value.has_value()) return JsonValue(nullptr);
-    return JsonValue(*value);
+    if (!value.has_value()) return nullptr;
+    return *value;
 }
 
 }  // namespace
-
-JsonValue::JsonValue() = default;
-
-JsonValue::JsonValue(std::nullptr_t)
-    : kind_(Kind::null_value)
-{
-}
-
-JsonValue::JsonValue(bool value)
-    : kind_(Kind::bool_value)
-    , bool_value_(value)
-{
-}
-
-JsonValue::JsonValue(int value)
-    : kind_(Kind::integer_value)
-    , integer_value_(value)
-{
-}
-
-JsonValue::JsonValue(std::int64_t value)
-    : kind_(Kind::integer_value)
-    , integer_value_(value)
-{
-}
-
-JsonValue::JsonValue(double value)
-    : kind_(Kind::double_value)
-    , double_value_(value)
-{
-}
-
-JsonValue::JsonValue(char const* value)
-    : kind_(Kind::string_value)
-    , string_value_(value == nullptr ? "" : value)
-{
-}
-
-JsonValue::JsonValue(std::string value)
-    : kind_(Kind::string_value)
-    , string_value_(std::move(value))
-{
-}
-
-JsonValue JsonValue::object()
-{
-    JsonValue value;
-    value.kind_ = Kind::object_value;
-    return value;
-}
-
-JsonValue JsonValue::array()
-{
-    JsonValue value;
-    value.kind_ = Kind::array_value;
-    return value;
-}
-
-JsonValue& JsonValue::add(std::string key, JsonValue value)
-{
-    if (kind_ != Kind::object_value)
-    {
-        kind_ = Kind::object_value;
-        object_values_.clear();
-        array_values_.clear();
-        string_value_.clear();
-        bool_value_ = false;
-        integer_value_ = 0;
-        double_value_ = 0.0;
-    }
-
-    object_values_.emplace_back(std::move(key), std::move(value));
-    return *this;
-}
-
-JsonValue& JsonValue::push(JsonValue value)
-{
-    if (kind_ != Kind::array_value)
-    {
-        kind_ = Kind::array_value;
-        array_values_.clear();
-        object_values_.clear();
-        string_value_.clear();
-        bool_value_ = false;
-        integer_value_ = 0;
-        double_value_ = 0.0;
-    }
-
-    array_values_.push_back(std::move(value));
-    return *this;
-}
-
-std::string JsonValue::to_string() const
-{
-    return serialize();
-}
-
-JsonValue::Kind JsonValue::kind() const
-{
-    return kind_;
-}
-
-std::string JsonValue::escape(std::string const& input)
-{
-    std::ostringstream out;
-    for (unsigned char const ch : input)
-    {
-        switch (ch)
-        {
-            case '"':
-                out << "\\\"";
-                break;
-            case '\\':
-                out << "\\\\";
-                break;
-            case '\b':
-                out << "\\b";
-                break;
-            case '\f':
-                out << "\\f";
-                break;
-            case '\n':
-                out << "\\n";
-                break;
-            case '\r':
-                out << "\\r";
-                break;
-            case '\t':
-                out << "\\t";
-                break;
-            default:
-                if (ch < 0x20)
-                {
-                    out << "\\u"
-                        << std::hex
-                        << std::setw(4)
-                        << std::setfill('0')
-                        << static_cast<int>(ch)
-                        << std::dec;
-                }
-                else
-                {
-                    out << static_cast<char>(ch);
-                }
-                break;
-        }
-    }
-    return out.str();
-}
-
-std::string JsonValue::serialize() const
-{
-    switch (kind_)
-    {
-        case Kind::null_value:
-            return "null";
-
-        case Kind::bool_value:
-            return bool_value_ ? "true" : "false";
-
-        case Kind::integer_value:
-            return std::to_string(integer_value_);
-
-        case Kind::double_value:
-        {
-            if (!std::isfinite(double_value_)) return "null";
-            std::ostringstream out;
-            out << std::setprecision(10) << double_value_;
-            return out.str();
-        }
-
-        case Kind::string_value:
-            return "\"" + escape(string_value_) + "\"";
-
-        case Kind::object_value:
-        {
-            std::ostringstream out;
-            out << "{";
-            for (std::size_t i = 0; i < object_values_.size(); ++i)
-            {
-                if (i > 0) out << ",";
-                out << "\"" << escape(object_values_[i].first) << "\":"
-                    << object_values_[i].second.serialize();
-            }
-            out << "}";
-            return out.str();
-        }
-
-        case Kind::array_value:
-        {
-            std::ostringstream out;
-            out << "[";
-            for (std::size_t i = 0; i < array_values_.size(); ++i)
-            {
-                if (i > 0) out << ",";
-                out << array_values_[i].serialize();
-            }
-            out << "]";
-            return out.str();
-        }
-    }
-
-    return "null";
-}
 
 TimestampPair capture_timestamp()
 {
@@ -326,27 +120,22 @@ DistributionSummary summarize_samples(std::vector<double> const& samples)
     return summary;
 }
 
-JsonValue distribution_summary_to_json(DistributionSummary const& summary)
+json distribution_summary_to_json(DistributionSummary const& summary)
 {
-    JsonValue json = JsonValue::object();
-    json.add("count", static_cast<std::int64_t>(summary.count));
-    json.add("min", optional_number(summary.min));
-    json.add("max", optional_number(summary.max));
-    json.add("mean", optional_number(summary.mean));
-    json.add("stddev", optional_number(summary.stddev));
-    json.add("p50", optional_number(summary.p50));
-    json.add("p95", optional_number(summary.p95));
-    return json;
+    return {
+        {"count", static_cast<std::int64_t>(summary.count)},
+        {"min", optional_number(summary.min)},
+        {"max", optional_number(summary.max)},
+        {"mean", optional_number(summary.mean)},
+        {"stddev", optional_number(summary.stddev)},
+        {"p50", optional_number(summary.p50)},
+        {"p95", optional_number(summary.p95)},
+    };
 }
 
-JsonValue strings_to_json_array(std::vector<std::string> const& values)
+json strings_to_json_array(std::vector<std::string> const& values)
 {
-    JsonValue json = JsonValue::array();
-    for (std::string const& value : values)
-    {
-        json.push(JsonValue(value));
-    }
-    return json;
+    return values;
 }
 
 std::string generate_id(std::string const& prefix)

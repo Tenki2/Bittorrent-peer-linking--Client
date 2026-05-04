@@ -1,3 +1,5 @@
+#include "artifact_lifecycle.hpp"
+#include "artifact_sender.hpp"
 #include "logging.hpp"
 #include "peer_stats.hpp"
 #include "summary_writer.hpp"
@@ -83,18 +85,122 @@ bool is_connection_failure_operation(lt::operation_t operation)
     }
 }
 
-btclient::JsonValue base_alert_payload(lt::alert const& alert)
+btclient::json base_alert_payload(lt::alert const& alert)
 {
-    btclient::JsonValue payload = btclient::JsonValue::object();
-    payload.add("alert_name", alert.what());
-    payload.add("message", alert.message());
-    return payload;
+    return {
+        {"alert_name", alert.what()},
+        {"message", alert.message()},
+    };
+}
+
+btclient::json null_if_empty(std::string const& value)
+{
+    if (value.empty()) return nullptr;
+    return value;
+}
+
+constexpr int kArtifactUploadFailureExitCode = 3;
+
+void record_upload_failure_or_throw(
+    btclient::RuntimeConfig const& config,
+    btclient::OutputPaths const& output_paths,
+    std::string const& upload_error)
+{
+    try
+    {
+        btclient::record_artifact_upload_failure(config, output_paths, upload_error);
+    }
+    catch (std::exception const& state_ex)
+    {
+        throw std::runtime_error(
+            upload_error
+            + "; additionally failed to update state.json with the upload failure: "
+            + state_ex.what());
+    }
+}
+
+bool retry_pending_artifact_uploads(btclient::RuntimeConfig const& config)
+{
+    std::vector<btclient::PendingArtifactSession> const pending_sessions =
+        btclient::find_pending_artifact_sessions(config.artifacts_dir);
+
+    bool saw_ready_session = false;
+    bool uploaded_any = false;
+
+    for (btclient::PendingArtifactSession const& pending_session : pending_sessions)
+    {
+        if (pending_session.state != btclient::ArtifactState::ReadyToUpload)
+        {
+            continue;
+        }
+
+        saw_ready_session = true;
+        if (config.destination_url.empty())
+        {
+            continue;
+        }
+
+        btclient::RuntimeConfig upload_config = config;
+        upload_config.run_id = pending_session.run_id.empty()
+            ? config.run_id
+            : pending_session.run_id;
+        upload_config.session_id = pending_session.session_id.empty()
+            ? pending_session.output_paths.artifact_dir.filename().string()
+            : pending_session.session_id;
+
+        if (config.console_status)
+        {
+            std::cout
+                << "Uploading pending artifacts from "
+                << pending_session.output_paths.artifact_dir
+                << "\n";
+        }
+
+        btclient::ArtifactSendResult send_result;
+        try
+        {
+            send_result = btclient::send_artifacts_to_destination(
+                upload_config,
+                pending_session.output_paths);
+        }
+        catch (std::exception const& ex)
+        {
+            record_upload_failure_or_throw(upload_config, pending_session.output_paths, ex.what());
+            throw;
+        }
+
+        btclient::OutputPaths const archived_paths =
+            btclient::archive_artifact_session(
+                upload_config,
+                pending_session.output_paths);
+
+        if (config.console_status)
+        {
+            std::cout
+                << "Pending artifacts sent to " << config.destination_url
+                << " (" << send_result.status_text << ")\n"
+                << "Archived at " << archived_paths.artifact_dir << "\n";
+        }
+
+        uploaded_any = true;
+    }
+
+    if (saw_ready_session && config.destination_url.empty() && config.console_status)
+    {
+        std::cout
+            << "Ready pending artifacts found under "
+            << btclient::pending_artifacts_dir(config.artifacts_dir)
+            << "; no destination URL configured, leaving them pending.\n";
+    }
+
+    return uploaded_any;
 }
 
 void print_usage()
 {
     std::cerr
-        << "Usage: btclient -f <magnet-uri|torrent-file> [options]\n\n"
+        << "Usage: btclient -f <magnet-uri|torrent-file> [options]\n"
+        << "       btclient --destination-url <url> [options]  # retry pending artifacts\n\n"
         << "Options:\n"
         << "  -f, --file <path>              Path to the .torrent file or magnet URI (required)\n"
         << "  -t, --time <sec>               Runtime in seconds (0 means run indefinitely, default: 60)\n"
@@ -106,6 +212,8 @@ void print_usage()
         << "      --artifacts-dir <path>     Base directory for per-run artifacts (default: ./artifacts)\n"
         << "      --event-log <path>         Explicit NDJSON event log path override\n"
         << "      --summary-json <path>      Explicit summary JSON path override\n"
+        << "      --destination-url <url>    HTTP URL to POST final artifacts to\n"
+        << "      --brain-url <url>          Alias for --destination-url\n"
         << "      --snapshot-interval-ms <n> Snapshot interval in milliseconds (default: 1000)\n"
         << "      --no-console-status        Disable periodic human-readable status lines\n"
         << "      --client-label <value>     Optional client label recorded in artifacts\n"
@@ -127,63 +235,63 @@ void drain_alerts(
 
         if (auto* al = lt::alert_cast<lt::listen_succeeded_alert>(alert))
         {
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("address", al->address.to_string());
-            payload.add("port", al->port);
-            payload.add("socket_type", btclient::socket_type_label(al->socket_type));
+            btclient::json payload = base_alert_payload(*al);
+            payload["address"] = al->address.to_string();
+            payload["port"] = al->port;
+            payload["socket_type"] = btclient::socket_type_label(al->socket_type);
             writer.write_event("listen_succeeded", std::move(payload));
         }
         else if (auto* al = lt::alert_cast<lt::listen_failed_alert>(alert))
         {
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("address", al->address.to_string());
-            payload.add("port", al->port);
-            payload.add("operation", lt::operation_name(al->op));
-            payload.add("error", al->error.message());
-            payload.add("socket_type", btclient::socket_type_label(al->socket_type));
+            btclient::json payload = base_alert_payload(*al);
+            payload["address"] = al->address.to_string();
+            payload["port"] = al->port;
+            payload["operation"] = lt::operation_name(al->op);
+            payload["error"] = al->error.message();
+            payload["socket_type"] = btclient::socket_type_label(al->socket_type);
             writer.write_event("listen_failed", std::move(payload));
         }
         else if (auto* al = lt::alert_cast<lt::tracker_announce_alert>(alert))
         {
             ++stats.tracker_announces;
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("tracker_url", al->tracker_url());
-            payload.add("event", tracker_event_name(al->event));
+            btclient::json payload = base_alert_payload(*al);
+            payload["tracker_url"] = al->tracker_url();
+            payload["event"] = tracker_event_name(al->event);
             writer.write_event("tracker_announce", std::move(payload));
         }
         else if (auto* al = lt::alert_cast<lt::tracker_reply_alert>(alert))
         {
             ++stats.tracker_replies;
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("tracker_url", al->tracker_url());
-            payload.add("num_peers", al->num_peers);
+            btclient::json payload = base_alert_payload(*al);
+            payload["tracker_url"] = al->tracker_url();
+            payload["num_peers"] = al->num_peers;
             writer.write_event("tracker_reply", std::move(payload));
         }
         else if (auto* al = lt::alert_cast<lt::tracker_error_alert>(alert))
         {
             ++stats.tracker_errors;
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("tracker_url", al->tracker_url());
-            payload.add("times_in_row", al->times_in_row);
-            payload.add("error", al->error.message());
-            payload.add("operation", lt::operation_name(al->op));
-            payload.add("failure_reason", al->failure_reason());
+            btclient::json payload = base_alert_payload(*al);
+            payload["tracker_url"] = al->tracker_url();
+            payload["times_in_row"] = al->times_in_row;
+            payload["error"] = al->error.message();
+            payload["operation"] = lt::operation_name(al->op);
+            payload["failure_reason"] = al->failure_reason();
             writer.write_event("tracker_error", std::move(payload));
         }
         else if (auto* al = lt::alert_cast<lt::tracker_warning_alert>(alert))
         {
             ++stats.tracker_warnings;
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("tracker_url", al->tracker_url());
-            payload.add("warning", al->warning_message());
+            btclient::json payload = base_alert_payload(*al);
+            payload["tracker_url"] = al->tracker_url();
+            payload["warning"] = al->warning_message();
             writer.write_event("tracker_warning", std::move(payload));
         }
         else if (auto* al = lt::alert_cast<lt::state_changed_alert>(alert))
         {
             stats.note_torrent_state(al->state);
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("previous_state", btclient::state_name(al->prev_state));
-            payload.add("state", btclient::state_name(al->state));
+            btclient::json payload = base_alert_payload(*al);
+            payload["previous_state"] = btclient::state_name(al->prev_state);
+            payload["state"] = btclient::state_name(al->state);
             writer.write_event("torrent_state_changed", std::move(payload));
         }
         else if (auto* al = lt::alert_cast<lt::torrent_finished_alert>(alert))
@@ -201,9 +309,9 @@ void drain_alerts(
                 direction,
                 transport);
 
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("peer_id_hex", btclient::peer_id_to_hex(al->pid));
-            payload.add("socket_type", btclient::socket_type_label(al->socket_type));
+            btclient::json payload = base_alert_payload(*al);
+            payload["peer_id_hex"] = btclient::peer_id_to_hex(al->pid);
+            payload["socket_type"] = btclient::socket_type_label(al->socket_type);
             writer.write_event("peer_connected", std::move(payload), peer.event_context());
         }
         else if (auto* al = lt::alert_cast<lt::peer_error_alert>(alert))
@@ -215,19 +323,19 @@ void drain_alerts(
             }
 
             btclient::PeerStats& peer = stats.note_peer_event(al->endpoint, al->pid, ts);
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("error", al->error.message());
-            payload.add("operation", lt::operation_name(al->op));
+            btclient::json payload = base_alert_payload(*al);
+            payload["error"] = al->error.message();
+            payload["operation"] = lt::operation_name(al->op);
             writer.write_event("peer_error", std::move(payload), peer.event_context());
         }
         else if (auto* al = lt::alert_cast<lt::peer_disconnected_alert>(alert))
         {
             btclient::PeerStats* peer = stats.note_peer_disconnect(al->endpoint, al->pid, ts);
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("error", al->error.message());
-            payload.add("operation", lt::operation_name(al->op));
-            payload.add("close_reason", static_cast<int>(al->reason));
-            payload.add("socket_type", btclient::socket_type_label(al->socket_type));
+            btclient::json payload = base_alert_payload(*al);
+            payload["error"] = al->error.message();
+            payload["operation"] = lt::operation_name(al->op);
+            payload["close_reason"] = static_cast<int>(al->reason);
+            payload["socket_type"] = btclient::socket_type_label(al->socket_type);
             writer.write_event(
                 "peer_disconnected",
                 std::move(payload),
@@ -236,11 +344,11 @@ void drain_alerts(
         else if (auto* al = lt::alert_cast<lt::incoming_connection_alert>(alert))
         {
             ++stats.incoming_connection_count;
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("peer_ip", al->endpoint.address().to_string());
-            payload.add("peer_port", al->endpoint.port());
-            payload.add("socket_type", btclient::socket_type_label(al->socket_type));
-            payload.add("transport", btclient::transport_from_socket_type(al->socket_type));
+            btclient::json payload = base_alert_payload(*al);
+            payload["peer_ip"] = al->endpoint.address().to_string();
+            payload["peer_port"] = al->endpoint.port();
+            payload["socket_type"] = btclient::socket_type_label(al->socket_type);
+            payload["transport"] = btclient::transport_from_socket_type(al->socket_type);
             writer.write_event("incoming_connection", std::move(payload));
         }
         else if (auto* al = lt::alert_cast<lt::peer_snubbed_alert>(alert))
@@ -259,9 +367,9 @@ void drain_alerts(
         {
             btclient::PeerStats& peer = stats.note_peer_event(al->endpoint, al->pid, ts);
             peer.note_request_sent(ts, static_cast<int>(al->piece_index), al->block_index);
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("piece", static_cast<int>(al->piece_index));
-            payload.add("block", al->block_index);
+            btclient::json payload = base_alert_payload(*al);
+            payload["piece"] = static_cast<int>(al->piece_index);
+            payload["block"] = al->block_index;
             writer.write_event("block_request_sent", std::move(payload), peer.event_context());
         }
         else if (auto* al = lt::alert_cast<lt::block_finished_alert>(alert))
@@ -269,71 +377,70 @@ void drain_alerts(
             btclient::PeerStats& peer = stats.note_peer_event(al->endpoint, al->pid, ts);
             peer.note_block_response(ts, static_cast<int>(al->piece_index), al->block_index);
             stats.last_piece_peer_key[static_cast<int>(al->piece_index)] = peer.peer_key;
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("piece", static_cast<int>(al->piece_index));
-            payload.add("block", al->block_index);
+            btclient::json payload = base_alert_payload(*al);
+            payload["piece"] = static_cast<int>(al->piece_index);
+            payload["block"] = al->block_index;
             writer.write_event("block_response_received", std::move(payload), peer.event_context());
         }
         else if (auto* al = lt::alert_cast<lt::block_timeout_alert>(alert))
         {
             btclient::PeerStats& peer = stats.note_peer_event(al->endpoint, al->pid, ts);
             peer.note_timeout(ts, static_cast<int>(al->piece_index), al->block_index);
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("piece", static_cast<int>(al->piece_index));
-            payload.add("block", al->block_index);
+            btclient::json payload = base_alert_payload(*al);
+            payload["piece"] = static_cast<int>(al->piece_index);
+            payload["block"] = al->block_index;
             writer.write_event("block_timeout", std::move(payload), peer.event_context());
         }
         else if (auto* al = lt::alert_cast<lt::request_dropped_alert>(alert))
         {
             btclient::PeerStats& peer = stats.note_peer_event(al->endpoint, al->pid, ts);
             peer.note_drop(ts, static_cast<int>(al->piece_index), al->block_index);
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("piece", static_cast<int>(al->piece_index));
-            payload.add("block", al->block_index);
+            btclient::json payload = base_alert_payload(*al);
+            payload["piece"] = static_cast<int>(al->piece_index);
+            payload["block"] = al->block_index;
             writer.write_event("request_dropped", std::move(payload), peer.event_context());
         }
         else if (auto* al = lt::alert_cast<lt::incoming_request_alert>(alert))
         {
             btclient::PeerStats& peer = stats.note_peer_event(al->endpoint, al->pid, ts);
             peer.note_incoming_request(ts, al->req);
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("piece", static_cast<int>(al->req.piece));
-            payload.add("start", al->req.start);
-            payload.add("length", al->req.length);
+            btclient::json payload = base_alert_payload(*al);
+            payload["piece"] = static_cast<int>(al->req.piece);
+            payload["start"] = al->req.start;
+            payload["length"] = al->req.length;
             writer.write_event("incoming_request", std::move(payload), peer.event_context());
         }
         else if (auto* al = lt::alert_cast<lt::block_uploaded_alert>(alert))
         {
             btclient::PeerStats& peer = stats.note_peer_event(al->endpoint, al->pid, ts);
             peer.note_block_uploaded(ts, static_cast<int>(al->piece_index), al->block_index);
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("piece", static_cast<int>(al->piece_index));
-            payload.add("block", al->block_index);
+            btclient::json payload = base_alert_payload(*al);
+            payload["piece"] = static_cast<int>(al->piece_index);
+            payload["block"] = al->block_index;
             writer.write_event("block_uploaded", std::move(payload), peer.event_context());
         }
         else if (auto* al = lt::alert_cast<lt::piece_finished_alert>(alert))
         {
             stats.note_piece_finished(static_cast<int>(al->piece_index));
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("piece", static_cast<int>(al->piece_index));
+            btclient::json payload = base_alert_payload(*al);
+            payload["piece"] = static_cast<int>(al->piece_index);
             writer.write_event("piece_finished", std::move(payload));
         }
         else if (auto* al = lt::alert_cast<lt::peer_log_alert>(alert))
         {
             btclient::PeerStats& peer = stats.note_peer_event(al->endpoint, al->pid, ts);
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add("peer_log_event", al->event_type);
-            payload.add("direction", static_cast<int>(al->direction));
-            payload.add("log_message", al->log_message());
+            btclient::json payload = base_alert_payload(*al);
+            payload["peer_log_event"] = al->event_type;
+            payload["direction"] = static_cast<int>(al->direction);
+            payload["log_message"] = al->log_message();
             writer.write_event("peer_log", std::move(payload), peer.event_context());
         }
         else if (auto* al = lt::alert_cast<lt::alerts_dropped_alert>(alert))
         {
             stats.note_alert_loss(static_cast<int>(al->dropped_alerts.count()));
-            btclient::JsonValue payload = base_alert_payload(*al);
-            payload.add(
-                "dropped_alert_type_bits",
-                static_cast<std::int64_t>(al->dropped_alerts.count()));
+            btclient::json payload = base_alert_payload(*al);
+            payload["dropped_alert_type_bits"] =
+                static_cast<std::int64_t>(al->dropped_alerts.count());
             writer.write_event("alerts_dropped", std::move(payload));
         }
     }
@@ -352,21 +459,23 @@ void capture_snapshots(
 
     stats.record_session_snapshot(torrent_status);
 
-    btclient::JsonValue session_payload = btclient::JsonValue::object();
-    session_payload.add("num_peers", torrent_status.num_peers);
-    session_payload.add("is_listening", session.is_listening());
-    session_payload.add("listen_port", session.listen_port());
+    btclient::json session_payload = {
+        {"num_peers", torrent_status.num_peers},
+        {"is_listening", session.is_listening()},
+        {"listen_port", session.listen_port()},
+    };
     writer.write_event("session_snapshot", std::move(session_payload));
 
-    btclient::JsonValue torrent_payload = btclient::JsonValue::object();
-    torrent_payload.add("state", btclient::state_name(torrent_status.state));
-    torrent_payload.add("progress", static_cast<double>(torrent_status.progress) * 100.0);
-    torrent_payload.add("num_peers", torrent_status.num_peers);
-    torrent_payload.add("num_seeds", torrent_status.num_seeds);
-    torrent_payload.add("total_done", torrent_status.total_done);
-    torrent_payload.add("total_upload", torrent_status.total_upload);
-    torrent_payload.add("download_rate_Bps", torrent_status.download_rate);
-    torrent_payload.add("upload_rate_Bps", torrent_status.upload_rate);
+    btclient::json torrent_payload = {
+        {"state", btclient::state_name(torrent_status.state)},
+        {"progress", static_cast<double>(torrent_status.progress) * 100.0},
+        {"num_peers", torrent_status.num_peers},
+        {"num_seeds", torrent_status.num_seeds},
+        {"total_done", torrent_status.total_done},
+        {"total_upload", torrent_status.total_upload},
+        {"download_rate_Bps", torrent_status.download_rate},
+        {"upload_rate_Bps", torrent_status.upload_rate},
+    };
     writer.write_event("torrent_snapshot", std::move(torrent_payload));
 
     std::vector<lt::peer_info> peers;
@@ -379,30 +488,31 @@ void capture_snapshots(
             ts,
             config.snapshot_interval_ms);
 
-        btclient::JsonValue payload = btclient::JsonValue::object();
-        payload.add("client", peer.client);
-        payload.add("payload_down_speed_Bps", peer.payload_down_speed);
-        payload.add("payload_up_speed_Bps", peer.payload_up_speed);
-        payload.add("down_speed_Bps", peer.down_speed);
-        payload.add("up_speed_Bps", peer.up_speed);
-        payload.add("total_download_bytes", peer.total_download);
-        payload.add("total_upload_bytes", peer.total_upload);
-        payload.add("download_queue_length", peer.download_queue_length);
-        payload.add("upload_queue_length", peer.upload_queue_length);
-        payload.add("timed_out_requests", peer.timed_out_requests);
-        payload.add("busy_requests", peer.busy_requests);
-        payload.add("requests_in_buffer", peer.requests_in_buffer);
-        payload.add("queue_bytes", peer.queue_bytes);
-        payload.add("request_timeout", peer.request_timeout);
-        payload.add("last_active_ms", lt::total_milliseconds(peer.last_active));
-        payload.add("last_request_ms", lt::total_milliseconds(peer.last_request));
-        payload.add("flags", btclient::strings_to_json_array(btclient::peer_flag_labels(peer)));
-        payload.add("sources", btclient::strings_to_json_array(btclient::peer_source_labels(peer)));
-        payload.add("peer_id_hex", btclient::peer_id_to_hex(peer.pid));
-        payload.add("downloading_piece", static_cast<int>(peer.downloading_piece_index));
-        payload.add("downloading_block", peer.downloading_block_index);
-        payload.add("downloading_progress", peer.downloading_progress);
-        payload.add("downloading_total", peer.downloading_total);
+        btclient::json payload = {
+            {"client", peer.client},
+            {"payload_down_speed_Bps", peer.payload_down_speed},
+            {"payload_up_speed_Bps", peer.payload_up_speed},
+            {"down_speed_Bps", peer.down_speed},
+            {"up_speed_Bps", peer.up_speed},
+            {"total_download_bytes", peer.total_download},
+            {"total_upload_bytes", peer.total_upload},
+            {"download_queue_length", peer.download_queue_length},
+            {"upload_queue_length", peer.upload_queue_length},
+            {"timed_out_requests", peer.timed_out_requests},
+            {"busy_requests", peer.busy_requests},
+            {"requests_in_buffer", peer.requests_in_buffer},
+            {"queue_bytes", peer.queue_bytes},
+            {"request_timeout", peer.request_timeout},
+            {"last_active_ms", lt::total_milliseconds(peer.last_active)},
+            {"last_request_ms", lt::total_milliseconds(peer.last_request)},
+            {"flags", btclient::strings_to_json_array(btclient::peer_flag_labels(peer))},
+            {"sources", btclient::strings_to_json_array(btclient::peer_source_labels(peer))},
+            {"peer_id_hex", btclient::peer_id_to_hex(peer.pid)},
+            {"downloading_piece", static_cast<int>(peer.downloading_piece_index)},
+            {"downloading_block", peer.downloading_block_index},
+            {"downloading_progress", peer.downloading_progress},
+            {"downloading_total", peer.downloading_total},
+        };
         writer.write_event("peer_snapshot", std::move(payload), peer_stats.event_context());
     }
 
@@ -486,6 +596,10 @@ int main(int argc, char** argv)
             {
                 summary_json_override = require_value(arg.c_str());
             }
+            else if (arg == "--destination-url" || arg == "--brain-url")
+            {
+                config.destination_url = require_value(arg.c_str());
+            }
             else if (arg == "--snapshot-interval-ms")
             {
                 config.snapshot_interval_ms = std::stoll(require_value(arg.c_str()));
@@ -513,10 +627,6 @@ int main(int argc, char** argv)
             }
         }
 
-        if (config.torrent_source.empty())
-        {
-            throw std::invalid_argument("torrent source (-f/--file) is required");
-        }
         if (config.listen_port < 0 || config.listen_port > 65535)
         {
             throw std::invalid_argument("listen port must be between 0 and 65535");
@@ -534,6 +644,26 @@ int main(int argc, char** argv)
             throw std::invalid_argument("node role must be victim, adversary, or unknown");
         }
 
+        bool uploaded_pending_artifacts = false;
+        try
+        {
+            uploaded_pending_artifacts = retry_pending_artifact_uploads(config);
+        }
+        catch (std::exception const& ex)
+        {
+            std::cerr << "Pending artifact upload/archive failed: " << ex.what() << "\n";
+            return kArtifactUploadFailureExitCode;
+        }
+
+        if (config.torrent_source.empty())
+        {
+            if (uploaded_pending_artifacts)
+            {
+                return 0;
+            }
+            throw std::invalid_argument("torrent source (-f/--file) is required");
+        }
+
         if (config.run_id.empty()) config.run_id = btclient::generate_id("run");
         if (config.session_id.empty()) config.session_id = btclient::generate_id("session");
         config.torrent_source_type = btclient::is_magnet_uri(config.torrent_source)
@@ -544,6 +674,10 @@ int main(int argc, char** argv)
             config,
             event_log_override,
             summary_json_override);
+        btclient::write_artifact_state(
+            config,
+            output_paths,
+            btclient::ArtifactState::Capturing);
 
         btclient::EventWriter writer(config, output_paths);
 
@@ -582,31 +716,28 @@ int main(int argc, char** argv)
         btclient::TimestampPair const session_start = btclient::capture_timestamp();
         btclient::SessionStats stats(config.run_id, config.session_id, session_start);
 
-        btclient::JsonValue start_payload = btclient::JsonValue::object();
-        start_payload.add("client_version", btclient::kClientVersion);
-        start_payload.add("hostname", btclient::get_hostname());
-        start_payload.add("artifact_dir", output_paths.artifact_dir.string());
+        btclient::json start_payload = {
+            {"client_version", btclient::kClientVersion},
+            {"hostname", btclient::get_hostname()},
+            {"artifact_dir", output_paths.artifact_dir.string()},
+        };
         writer.write_event("session_started", std::move(start_payload));
 
-        btclient::JsonValue config_payload = btclient::JsonValue::object();
-        config_payload.add("listen_port", config.listen_port);
-        config_payload.add("announce_ip", config.announce_ip.empty()
-            ? btclient::JsonValue(nullptr)
-            : btclient::JsonValue(config.announce_ip));
-        config_payload.add("dht_enabled", config.enable_dht);
-        config_payload.add("lsd_enabled", config.enable_lsd);
-        config_payload.add("upnp_enabled", config.enable_upnp);
-        config_payload.add("natpmp_enabled", config.enable_natpmp);
-        config_payload.add("runtime_seconds", config.runtime_seconds);
-        config_payload.add("snapshot_interval_ms", config.snapshot_interval_ms);
-        config_payload.add("torrent_source_type", config.torrent_source_type);
-        config_payload.add("save_path", std::filesystem::absolute(config.save_path).string());
-        config_payload.add("client_label", config.client_label.empty()
-            ? btclient::JsonValue(nullptr)
-            : btclient::JsonValue(config.client_label));
-        config_payload.add("profile_id", config.profile_id.empty()
-            ? btclient::JsonValue(nullptr)
-            : btclient::JsonValue(config.profile_id));
+        btclient::json config_payload = {
+            {"listen_port", config.listen_port},
+            {"announce_ip", null_if_empty(config.announce_ip)},
+            {"dht_enabled", config.enable_dht},
+            {"lsd_enabled", config.enable_lsd},
+            {"upnp_enabled", config.enable_upnp},
+            {"natpmp_enabled", config.enable_natpmp},
+            {"runtime_seconds", config.runtime_seconds},
+            {"snapshot_interval_ms", config.snapshot_interval_ms},
+            {"torrent_source_type", config.torrent_source_type},
+            {"save_path", std::filesystem::absolute(config.save_path).string()},
+            {"client_label", null_if_empty(config.client_label)},
+            {"profile_id", null_if_empty(config.profile_id)},
+            {"destination_url", null_if_empty(config.destination_url)},
+        };
         writer.write_event("session_config", std::move(config_payload));
 
         lt::add_torrent_params params;
@@ -647,12 +778,11 @@ int main(int argc, char** argv)
         info_hash = btclient::info_hash_to_string(initial_status.info_hashes);
         writer.set_info_hash(info_hash);
 
-        btclient::JsonValue torrent_added_payload = btclient::JsonValue::object();
-        torrent_added_payload.add("source_type", config.torrent_source_type);
-        torrent_added_payload.add("save_path", std::filesystem::absolute(config.save_path).string());
-        torrent_added_payload.add("info_hash", info_hash.empty()
-            ? btclient::JsonValue(nullptr)
-            : btclient::JsonValue(info_hash));
+        btclient::json torrent_added_payload = {
+            {"source_type", config.torrent_source_type},
+            {"save_path", std::filesystem::absolute(config.save_path).string()},
+            {"info_hash", null_if_empty(info_hash)},
+        };
         writer.write_event("torrent_added", std::move(torrent_added_payload));
 
         if (config.console_status)
@@ -727,14 +857,16 @@ int main(int argc, char** argv)
             ? "signal"
             : (run_forever ? "stopped" : "runtime_elapsed");
 
-        btclient::JsonValue finish_payload = btclient::JsonValue::object();
-        finish_payload.add("exit_reason", exit_reason);
-        finish_payload.add("duration_ms", btclient::ns_to_ms(stats.end_mono_ns - stats.start_mono_ns));
-        finish_payload.add("final_state", btclient::state_name(final_status.state));
-        finish_payload.add("final_progress", static_cast<double>(final_status.progress) * 100.0);
-        finish_payload.add("total_done", final_status.total_done);
-        finish_payload.add("total_upload", final_status.total_upload);
+        btclient::json finish_payload = {
+            {"exit_reason", exit_reason},
+            {"duration_ms", btclient::ns_to_ms(stats.end_mono_ns - stats.start_mono_ns)},
+            {"final_state", btclient::state_name(final_status.state)},
+            {"final_progress", static_cast<double>(final_status.progress) * 100.0},
+            {"total_done", final_status.total_done},
+            {"total_upload", final_status.total_upload},
+        };
         writer.write_event("session_finished", std::move(finish_payload));
+        writer.close();
 
         btclient::write_session_summary(
             config,
@@ -745,6 +877,10 @@ int main(int argc, char** argv)
             exit_reason,
             session.listen_port(),
             session.is_listening());
+        btclient::write_artifact_state(
+            config,
+            output_paths,
+            btclient::ArtifactState::ReadyToUpload);
 
         if (config.console_status)
         {
@@ -752,6 +888,50 @@ int main(int argc, char** argv)
                 << "Artifacts written to " << output_paths.artifact_dir
                 << "\nSummary: " << output_paths.summary_json_path
                 << "\n";
+        }
+
+        if (!config.destination_url.empty())
+        {
+            try
+            {
+                btclient::ArtifactSendResult send_result;
+                try
+                {
+                    send_result = btclient::send_artifacts_to_destination(config, output_paths);
+                }
+                catch (std::exception const& ex)
+                {
+                    record_upload_failure_or_throw(config, output_paths, ex.what());
+                    throw;
+                }
+
+                if (config.console_status)
+                {
+                    std::cout
+                        << "Artifacts sent to " << config.destination_url
+                        << " (" << send_result.status_text << ")\n";
+                }
+                btclient::OutputPaths const archived_paths =
+                    btclient::archive_artifact_session(config, output_paths);
+                if (config.console_status)
+                {
+                    std::cout
+                        << "Artifacts archived at "
+                        << archived_paths.artifact_dir
+                        << "\n";
+                }
+            }
+            catch (std::exception const& ex)
+            {
+                std::cerr << "Artifact upload/archive failed: " << ex.what() << "\n";
+                return kArtifactUploadFailureExitCode;
+            }
+        }
+        else if (config.console_status)
+        {
+            std::cout
+                << "No destination URL configured; artifacts remain pending and ready "
+                << "for a later upload.\n";
         }
 
         return 0;

@@ -149,7 +149,7 @@ struct PeerStats {
     void finalize(TimestampPair const& session_end);
     void reset_outstanding_requests();
 
-    JsonValue to_json() const;
+    json to_json() const;
 
 private:
     void note_interaction(std::int64_t mono_ns);
@@ -241,7 +241,7 @@ struct SessionStats {
     void record_session_snapshot(libtorrent::torrent_status const& torrent_status);
     void finalize(TimestampPair const& end);
     std::size_t unique_peers_seen() const;
-    JsonValue peer_summaries_json() const;
+    json peer_summaries_json() const;
 };
 
 }  // namespace btclient

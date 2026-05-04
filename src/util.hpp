@@ -6,64 +6,21 @@
 #include <libtorrent/socket.hpp>
 #include <libtorrent/socket_type.hpp>
 #include <libtorrent/torrent_status.hpp>
+#include <nlohmann/json.hpp>
 
 #include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace btclient {
 
+using json = nlohmann::json;
+
 struct TimestampPair {
     std::string utc_ts;
     std::int64_t mono_ns = 0;
-};
-
-// Small JSON writer used for artifacts. It keeps this tool self-contained and
-// covers only the value types we need in the event log and summary files.
-class JsonValue {
-public:
-    enum class Kind {
-        null_value,
-        bool_value,
-        integer_value,
-        double_value,
-        string_value,
-        object_value,
-        array_value
-    };
-
-    JsonValue();
-    JsonValue(std::nullptr_t);
-    JsonValue(bool value);
-    JsonValue(int value);
-    JsonValue(std::int64_t value);
-    JsonValue(double value);
-    JsonValue(char const* value);
-    JsonValue(std::string value);
-
-    static JsonValue object();
-    static JsonValue array();
-
-    JsonValue& add(std::string key, JsonValue value);
-    JsonValue& push(JsonValue value);
-
-    std::string to_string() const;
-    Kind kind() const;
-
-private:
-    static std::string escape(std::string const& input);
-    std::string serialize() const;
-
-    Kind kind_ = Kind::null_value;
-    bool bool_value_ = false;
-    std::int64_t integer_value_ = 0;
-    double double_value_ = 0.0;
-    std::string string_value_;
-    std::vector<std::pair<std::string, JsonValue>> object_values_;
-    std::vector<JsonValue> array_values_;
 };
 
 struct DistributionSummary {
@@ -91,8 +48,8 @@ std::int64_t monotonic_now_ns();
 double ns_to_ms(std::int64_t ns);
 
 DistributionSummary summarize_samples(std::vector<double> const& samples);
-JsonValue distribution_summary_to_json(DistributionSummary const& summary);
-JsonValue strings_to_json_array(std::vector<std::string> const& values);
+json distribution_summary_to_json(DistributionSummary const& summary);
+json strings_to_json_array(std::vector<std::string> const& values);
 
 std::string generate_id(std::string const& prefix);
 std::string get_hostname();

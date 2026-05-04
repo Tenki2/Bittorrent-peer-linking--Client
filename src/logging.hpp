@@ -20,6 +20,7 @@ struct RuntimeConfig {
     std::string announce_ip;
     std::string client_label;
     std::string profile_id;
+    std::string destination_url;
     std::filesystem::path artifacts_dir = "./artifacts";
     std::filesystem::path save_path = "./data";
     int runtime_seconds = 60;
@@ -34,6 +35,7 @@ struct RuntimeConfig {
 
 struct OutputPaths {
     std::filesystem::path artifact_dir;
+    std::filesystem::path state_json_path;
     std::filesystem::path event_log_path;
     std::filesystem::path summary_json_path;
 };
@@ -56,9 +58,10 @@ public:
     EventWriter(RuntimeConfig const& config, OutputPaths const& output_paths);
 
     void set_info_hash(std::string info_hash);
+    void close();
     void write_event(
         std::string event_type,
-        JsonValue payload,
+        json payload,
         std::optional<EventPeerContext> peer_context = std::nullopt);
 
 private:

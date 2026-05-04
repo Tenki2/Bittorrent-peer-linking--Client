@@ -12,16 +12,16 @@ namespace {
 
 constexpr double kIncomingRequestBurstGapMs = 100.0;
 
-JsonValue optional_double(std::optional<double> const& value)
+json optional_double(std::optional<double> const& value)
 {
-    if (!value.has_value()) return JsonValue(nullptr);
-    return JsonValue(*value);
+    if (!value.has_value()) return nullptr;
+    return *value;
 }
 
-JsonValue optional_string(std::string const& value)
+json optional_string(std::string const& value)
 {
-    if (value.empty()) return JsonValue(nullptr);
-    return JsonValue(value);
+    if (value.empty()) return nullptr;
+    return value;
 }
 
 std::vector<std::string> sorted_strings(std::set<std::string> const& values)
@@ -435,7 +435,7 @@ void PeerStats::reset_outstanding_requests()
     record_outstanding_depth(0.0);
 }
 
-JsonValue PeerStats::to_json() const
+json PeerStats::to_json() const
 {
     DistributionSummary const request_gap_summary = summarize_samples(request_gap_ms_samples);
     DistributionSummary const latency_summary = summarize_samples(block_latency_ms_samples);
@@ -462,103 +462,104 @@ JsonValue PeerStats::to_json() const
     double const duration_score = (std::min)(1.0, observation_duration_ms / 30000.0);
     double const observation_quality_score = sample_score * duration_score;
 
-    JsonValue state_transitions = JsonValue::object();
-    state_transitions.add("peer_choked_us", choked_count);
-    state_transitions.add("peer_unchoked_us", unchoked_count);
-    state_transitions.add("we_choked_peer", we_choked_count);
-    state_transitions.add("we_unchoked_peer", we_unchoked_count);
-    state_transitions.add("peer_snubbed", snubbed_count);
-    state_transitions.add("peer_unsnubbed", unsnubbed_count);
+    json state_transitions = {
+        {"peer_choked_us", choked_count},
+        {"peer_unchoked_us", unchoked_count},
+        {"we_choked_peer", we_choked_count},
+        {"we_unchoked_peer", we_unchoked_count},
+        {"peer_snubbed", snubbed_count},
+        {"peer_unsnubbed", unsnubbed_count},
+    };
 
-    JsonValue json = JsonValue::object();
-    json.add("peer_key", peer_key);
-    json.add("peer_ip", peer_ip);
-    json.add("peer_port", peer_port);
-    json.add("direction", direction);
-    json.add("transport", transport);
-    json.add("peer_id_hex", optional_string(peer_id_hex == "unknown" ? "" : peer_id_hex));
-    json.add("peer_id_prefix", optional_string(peer_id_prefix_hex));
-    json.add("client", optional_string(client_name));
-    json.add("capability_flags", strings_to_json_array(sorted_strings(observed_flags)));
-    json.add("peer_sources", strings_to_json_array(sorted_strings(observed_sources)));
-    json.add("first_seen_utc", optional_string(first_seen_utc));
-    json.add("last_seen_utc", optional_string(last_seen_utc));
-    json.add("connected_utc", optional_string(connected_utc));
-    json.add("disconnected_utc", optional_string(disconnected_utc));
-    json.add("first_seen_mono_ns", first_seen_mono_ns);
-    json.add("last_seen_mono_ns", last_seen_mono_ns);
-    json.add("total_connected_duration_ms", ns_to_ms(connected_duration_ns(*this)));
-    json.add("connection_duration_ms", ns_to_ms(connected_duration_ns(*this)));
-    json.add("first_request_delay_ms", optional_double(first_request_delay_ms));
-    json.add("first_incoming_request_delay_ms", optional_double(first_incoming_request_delay_ms));
-    json.add("first_block_upload_delay_ms", optional_double(first_block_upload_delay_ms));
-    json.add("mean_request_gap_ms", optional_double(request_gap_summary.mean));
-    json.add("std_request_gap_ms", optional_double(request_gap_summary.stddev));
-    json.add("p50_request_gap_ms", optional_double(request_gap_summary.p50));
-    json.add("p95_request_gap_ms", optional_double(request_gap_summary.p95));
-    json.add("mean_incoming_request_gap_ms", optional_double(incoming_request_gap_summary.mean));
-    json.add("std_incoming_request_gap_ms", optional_double(incoming_request_gap_summary.stddev));
-    json.add("p50_incoming_request_gap_ms", optional_double(incoming_request_gap_summary.p50));
-    json.add("p95_incoming_request_gap_ms", optional_double(incoming_request_gap_summary.p95));
-    json.add("mean_block_upload_gap_ms", optional_double(block_upload_gap_summary.mean));
-    json.add("std_block_upload_gap_ms", optional_double(block_upload_gap_summary.stddev));
-    json.add("p50_block_upload_gap_ms", optional_double(block_upload_gap_summary.p50));
-    json.add("p95_block_upload_gap_ms", optional_double(block_upload_gap_summary.p95));
-    json.add("mean_request_to_upload_latency_ms", optional_double(request_to_upload_latency_summary.mean));
-    json.add("std_request_to_upload_latency_ms", optional_double(request_to_upload_latency_summary.stddev));
-    json.add("p50_request_to_upload_latency_ms", optional_double(request_to_upload_latency_summary.p50));
-    json.add("p95_request_to_upload_latency_ms", optional_double(request_to_upload_latency_summary.p95));
-    json.add("mean_block_latency_ms", optional_double(latency_summary.mean));
-    json.add("std_block_latency_ms", optional_double(latency_summary.stddev));
-    json.add("p50_block_latency_ms", optional_double(latency_summary.p50));
-    json.add("p95_block_latency_ms", optional_double(latency_summary.p95));
-    json.add("mean_interaction_gap_ms", optional_double(interaction_gap_summary.mean));
-    json.add("mean_incoming_request_burst_size", optional_double(incoming_request_burst_size_summary.mean));
-    json.add("p95_incoming_request_burst_size", optional_double(incoming_request_burst_size_summary.p95));
-    json.add("mean_incoming_request_burst_duration_ms", optional_double(incoming_request_burst_duration_summary.mean));
-    json.add("p95_incoming_request_burst_duration_ms", optional_double(incoming_request_burst_duration_summary.p95));
-    json.add("mean_incoming_request_burst_idle_gap_ms", optional_double(incoming_request_burst_idle_gap_summary.mean));
-    json.add("p95_incoming_request_burst_idle_gap_ms", optional_double(incoming_request_burst_idle_gap_summary.p95));
-    json.add("active_time_ms", ns_to_ms(active_time_ns));
-    json.add("idle_time_ms", ns_to_ms(idle_time_ns));
-    json.add("observation_quality_score", observation_quality_score);
-    json.add("observation_sample_count", requests_sent + incoming_requests_received);
-    json.add("requests_sent", requests_sent);
-    json.add("block_responses_received", block_responses_received);
-    json.add("request_timeouts", request_timeouts);
-    json.add("requests_dropped", requests_dropped);
-    json.add("pieces_finished", pieces_finished);
-    json.add("snubbed_count", snubbed_count);
-    json.add("unsnubbed_count", unsnubbed_count);
-    json.add("choked_count", choked_count);
-    json.add("unchoked_count", unchoked_count);
-    json.add("mean_download_rate_Bps", optional_double(download_rate_summary.mean));
-    json.add("mean_upload_rate_Bps", optional_double(upload_rate_summary.mean));
-    json.add("peak_download_rate_Bps", peak_download_rate_Bps);
-    json.add("peak_upload_rate_Bps", peak_upload_rate_Bps);
-    json.add("request_gap_summary", distribution_summary_to_json(request_gap_summary));
-    json.add("block_latency_summary", distribution_summary_to_json(latency_summary));
-    json.add("incoming_request_gap_summary", distribution_summary_to_json(incoming_request_gap_summary));
-    json.add("block_upload_gap_summary", distribution_summary_to_json(block_upload_gap_summary));
-    json.add("request_to_upload_latency_summary", distribution_summary_to_json(request_to_upload_latency_summary));
-    json.add("incoming_request_burst_size_summary", distribution_summary_to_json(incoming_request_burst_size_summary));
-    json.add("incoming_request_burst_duration_summary", distribution_summary_to_json(incoming_request_burst_duration_summary));
-    json.add("incoming_request_burst_idle_gap_summary", distribution_summary_to_json(incoming_request_burst_idle_gap_summary));
-    json.add("interaction_gap_summary", distribution_summary_to_json(interaction_gap_summary));
-    json.add("download_rate_summary", distribution_summary_to_json(download_rate_summary));
-    json.add("upload_rate_summary", distribution_summary_to_json(upload_rate_summary));
-    json.add("outstanding_request_depth_summary", distribution_summary_to_json(outstanding_depth_summary));
-    json.add("state_transition_counts", std::move(state_transitions));
-    json.add("total_download_bytes", total_download_bytes);
-    json.add("total_upload_bytes", total_upload_bytes);
-    json.add("incoming_requests_received", incoming_requests_received);
-    json.add("blocks_uploaded", blocks_uploaded);
-    json.add("supports_extensions", observed_flags.count("supports_extensions") > 0);
-    json.add("is_seed", seed);
-    json.add("remote_choked", remote_choked);
-    json.add("local_choked", local_choked);
-    json.add("snubbed", snubbed);
-    return json;
+    return {
+        {"peer_key", peer_key},
+        {"peer_ip", peer_ip},
+        {"peer_port", peer_port},
+        {"direction", direction},
+        {"transport", transport},
+        {"peer_id_hex", optional_string(peer_id_hex == "unknown" ? "" : peer_id_hex)},
+        {"peer_id_prefix", optional_string(peer_id_prefix_hex)},
+        {"client", optional_string(client_name)},
+        {"capability_flags", strings_to_json_array(sorted_strings(observed_flags))},
+        {"peer_sources", strings_to_json_array(sorted_strings(observed_sources))},
+        {"first_seen_utc", optional_string(first_seen_utc)},
+        {"last_seen_utc", optional_string(last_seen_utc)},
+        {"connected_utc", optional_string(connected_utc)},
+        {"disconnected_utc", optional_string(disconnected_utc)},
+        {"first_seen_mono_ns", first_seen_mono_ns},
+        {"last_seen_mono_ns", last_seen_mono_ns},
+        {"total_connected_duration_ms", ns_to_ms(connected_duration_ns(*this))},
+        {"connection_duration_ms", ns_to_ms(connected_duration_ns(*this))},
+        {"first_request_delay_ms", optional_double(first_request_delay_ms)},
+        {"first_incoming_request_delay_ms", optional_double(first_incoming_request_delay_ms)},
+        {"first_block_upload_delay_ms", optional_double(first_block_upload_delay_ms)},
+        {"mean_request_gap_ms", optional_double(request_gap_summary.mean)},
+        {"std_request_gap_ms", optional_double(request_gap_summary.stddev)},
+        {"p50_request_gap_ms", optional_double(request_gap_summary.p50)},
+        {"p95_request_gap_ms", optional_double(request_gap_summary.p95)},
+        {"mean_incoming_request_gap_ms", optional_double(incoming_request_gap_summary.mean)},
+        {"std_incoming_request_gap_ms", optional_double(incoming_request_gap_summary.stddev)},
+        {"p50_incoming_request_gap_ms", optional_double(incoming_request_gap_summary.p50)},
+        {"p95_incoming_request_gap_ms", optional_double(incoming_request_gap_summary.p95)},
+        {"mean_block_upload_gap_ms", optional_double(block_upload_gap_summary.mean)},
+        {"std_block_upload_gap_ms", optional_double(block_upload_gap_summary.stddev)},
+        {"p50_block_upload_gap_ms", optional_double(block_upload_gap_summary.p50)},
+        {"p95_block_upload_gap_ms", optional_double(block_upload_gap_summary.p95)},
+        {"mean_request_to_upload_latency_ms", optional_double(request_to_upload_latency_summary.mean)},
+        {"std_request_to_upload_latency_ms", optional_double(request_to_upload_latency_summary.stddev)},
+        {"p50_request_to_upload_latency_ms", optional_double(request_to_upload_latency_summary.p50)},
+        {"p95_request_to_upload_latency_ms", optional_double(request_to_upload_latency_summary.p95)},
+        {"mean_block_latency_ms", optional_double(latency_summary.mean)},
+        {"std_block_latency_ms", optional_double(latency_summary.stddev)},
+        {"p50_block_latency_ms", optional_double(latency_summary.p50)},
+        {"p95_block_latency_ms", optional_double(latency_summary.p95)},
+        {"mean_interaction_gap_ms", optional_double(interaction_gap_summary.mean)},
+        {"mean_incoming_request_burst_size", optional_double(incoming_request_burst_size_summary.mean)},
+        {"p95_incoming_request_burst_size", optional_double(incoming_request_burst_size_summary.p95)},
+        {"mean_incoming_request_burst_duration_ms", optional_double(incoming_request_burst_duration_summary.mean)},
+        {"p95_incoming_request_burst_duration_ms", optional_double(incoming_request_burst_duration_summary.p95)},
+        {"mean_incoming_request_burst_idle_gap_ms", optional_double(incoming_request_burst_idle_gap_summary.mean)},
+        {"p95_incoming_request_burst_idle_gap_ms", optional_double(incoming_request_burst_idle_gap_summary.p95)},
+        {"active_time_ms", ns_to_ms(active_time_ns)},
+        {"idle_time_ms", ns_to_ms(idle_time_ns)},
+        {"observation_quality_score", observation_quality_score},
+        {"observation_sample_count", requests_sent + incoming_requests_received},
+        {"requests_sent", requests_sent},
+        {"block_responses_received", block_responses_received},
+        {"request_timeouts", request_timeouts},
+        {"requests_dropped", requests_dropped},
+        {"pieces_finished", pieces_finished},
+        {"snubbed_count", snubbed_count},
+        {"unsnubbed_count", unsnubbed_count},
+        {"choked_count", choked_count},
+        {"unchoked_count", unchoked_count},
+        {"mean_download_rate_Bps", optional_double(download_rate_summary.mean)},
+        {"mean_upload_rate_Bps", optional_double(upload_rate_summary.mean)},
+        {"peak_download_rate_Bps", peak_download_rate_Bps},
+        {"peak_upload_rate_Bps", peak_upload_rate_Bps},
+        {"request_gap_summary", distribution_summary_to_json(request_gap_summary)},
+        {"block_latency_summary", distribution_summary_to_json(latency_summary)},
+        {"incoming_request_gap_summary", distribution_summary_to_json(incoming_request_gap_summary)},
+        {"block_upload_gap_summary", distribution_summary_to_json(block_upload_gap_summary)},
+        {"request_to_upload_latency_summary", distribution_summary_to_json(request_to_upload_latency_summary)},
+        {"incoming_request_burst_size_summary", distribution_summary_to_json(incoming_request_burst_size_summary)},
+        {"incoming_request_burst_duration_summary", distribution_summary_to_json(incoming_request_burst_duration_summary)},
+        {"incoming_request_burst_idle_gap_summary", distribution_summary_to_json(incoming_request_burst_idle_gap_summary)},
+        {"interaction_gap_summary", distribution_summary_to_json(interaction_gap_summary)},
+        {"download_rate_summary", distribution_summary_to_json(download_rate_summary)},
+        {"upload_rate_summary", distribution_summary_to_json(upload_rate_summary)},
+        {"outstanding_request_depth_summary", distribution_summary_to_json(outstanding_depth_summary)},
+        {"state_transition_counts", std::move(state_transitions)},
+        {"total_download_bytes", total_download_bytes},
+        {"total_upload_bytes", total_upload_bytes},
+        {"incoming_requests_received", incoming_requests_received},
+        {"blocks_uploaded", blocks_uploaded},
+        {"supports_extensions", observed_flags.count("supports_extensions") > 0},
+        {"is_seed", seed},
+        {"remote_choked", remote_choked},
+        {"local_choked", local_choked},
+        {"snubbed", snubbed},
+    };
 }
 
 void PeerStats::note_interaction(std::int64_t mono_ns)
@@ -832,15 +833,15 @@ std::size_t SessionStats::unique_peers_seen() const
     return unique_peer_endpoints.size();
 }
 
-JsonValue SessionStats::peer_summaries_json() const
+json SessionStats::peer_summaries_json() const
 {
-    JsonValue json = JsonValue::array();
+    json peers = json::array();
     for (auto const& [peer_key, peer] : peers_by_key)
     {
         (void)peer_key;
-        json.push(peer.to_json());
+        peers.push_back(peer.to_json());
     }
-    return json;
+    return peers;
 }
 
 }  // namespace btclient
