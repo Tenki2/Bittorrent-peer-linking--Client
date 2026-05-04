@@ -210,6 +210,7 @@ void print_usage()
         << "      --session-id <value>       Explicit session identifier\n"
         << "      --node-role <value>        victim | adversary | unknown (default: unknown)\n"
         << "      --artifacts-dir <path>     Base directory for per-run artifacts (default: ./artifacts)\n"
+        << "      --save-path <path>         Directory where torrent data is saved (default: ./data)\n"
         << "      --event-log <path>         Explicit NDJSON event log path override\n"
         << "      --summary-json <path>      Explicit summary JSON path override\n"
         << "      --destination-url <url>    HTTP URL to POST final artifacts to\n"
@@ -587,6 +588,10 @@ int main(int argc, char** argv)
             else if (arg == "--artifacts-dir")
             {
                 config.artifacts_dir = require_value(arg.c_str());
+            }
+            else if (arg == "--save-path")
+            {
+                config.save_path = require_value(arg.c_str());
             }
             else if (arg == "--event-log")
             {
