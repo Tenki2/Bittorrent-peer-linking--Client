@@ -1,0 +1,12 @@
+.git
+.gitignore
+**/build
+**/artifacts
+**/artifacts-test
+**/*.o
+**/*.a
+**/*.so
+**/*.log
+**/.DS_Store
+readme.md
+.vscode

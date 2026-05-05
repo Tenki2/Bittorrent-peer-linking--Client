@@ -7,3 +7,4 @@ btclient
 .vscode
 src/artifacts-test/*
 src/artifacts/*
+docker-assets

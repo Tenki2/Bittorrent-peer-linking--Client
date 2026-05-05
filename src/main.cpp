@@ -537,6 +537,8 @@ void capture_snapshots(
 
 int main(int argc, char** argv)
 {
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
     try
     {
         std::signal(SIGINT, handle_signal);
