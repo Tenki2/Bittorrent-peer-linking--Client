@@ -6,7 +6,9 @@
 #include "util.hpp"
 
 #include <libtorrent/add_torrent_params.hpp>
+#include <libtorrent/address.hpp>
 #include <libtorrent/alert_types.hpp>
+#include <libtorrent/ip_filter.hpp>
 #include <libtorrent/magnet_uri.hpp>
 #include <libtorrent/operations.hpp>
 #include <libtorrent/session.hpp>
@@ -100,6 +102,17 @@ btclient::json null_if_empty(std::string const& value)
 }
 
 constexpr int kArtifactUploadFailureExitCode = 3;
+constexpr char kTailscaleCgnatRange[] = "100.64.0.0/10";
+
+void apply_tailscale_peer_filter(lt::session& session)
+{
+    lt::ip_filter filter;
+    filter.add_rule(
+        lt::make_address("100.64.0.0"),
+        lt::make_address("100.127.255.255"),
+        lt::ip_filter::blocked);
+    session.set_ip_filter(std::move(filter));
+}
 
 void record_upload_failure_or_throw(
     btclient::RuntimeConfig const& config,
@@ -719,6 +732,7 @@ int main(int argc, char** argv)
                 | lt::alert_category::incoming_request);
 
         lt::session session(settings_pack);
+        apply_tailscale_peer_filter(session);
 
         btclient::TimestampPair const session_start = btclient::capture_timestamp();
         btclient::SessionStats stats(config.run_id, config.session_id, session_start);
@@ -733,6 +747,7 @@ int main(int argc, char** argv)
         btclient::json config_payload = {
             {"listen_port", config.listen_port},
             {"announce_ip", null_if_empty(config.announce_ip)},
+            {"blocked_peer_ranges", btclient::json::array({kTailscaleCgnatRange})},
             {"dht_enabled", config.enable_dht},
             {"lsd_enabled", config.enable_lsd},
             {"upnp_enabled", config.enable_upnp},

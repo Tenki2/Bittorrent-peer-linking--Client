@@ -40,6 +40,16 @@ Useful flags:
 - `--destination-url` or `--brain-url` to POST final artifacts as multipart form data.
 - `--no-console-status` to suppress the periodic human-readable status line.
 
+## Docker
+
+```bash
+sudo docker build -t btclient:dev .
+sudo docker tag btclient:dev ghcr.io/tenki2/btclient:dev
+sudo docker push ghcr.io/tenki2/btclient:dev
+```
+
+
+
 ## Artifacts
 
 By default each run writes artifacts under:
